@@ -832,11 +832,11 @@ print(f"\nHybrid recommendation response time: {response_time:.4f} seconds")
 # 22. COMPLETION MESSAGE
 # ============================================================
 
-#print("\nProgram completed successfully.")
+print("\nProgram completed successfully.")
 
-#print("\nGenerated files:")
-#print("1. movie_recommender_evaluation_results.csv")
-#print("2. popular_movie_recommendations.csv")
-#print("3. content_movie_recommendations.csv")
-#print("4. collaborative_movie_recommendations.csv")
-#print("5. hybrid_movie_recommendations.csv")
+print("\nGenerated files:")
+print("1. movie_recommender_evaluation_results.csv")
+print("2. popular_movie_recommendations.csv")
+print("3. content_movie_recommendations.csv")
+print("4. collaborative_movie_recommendations.csv")
+print("5. hybrid_movie_recommendations.csv")
