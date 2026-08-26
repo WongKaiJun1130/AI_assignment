@@ -528,113 +528,245 @@ def recommend_hybrid(title, top_n=10):
     return result
 
 
-# ============================================================
-# 14. DISPLAY SYSTEM INFORMATION
-# ============================================================
-
-print("\n" + "=" * 110)
-print("BOOK RECOMMENDER SYSTEM")
-print("=" * 110)
-
-print("\nSelected Book:")
-print(example_book)
-
 
 # ============================================================
-# 15. DISPLAY METHOD 1 RESULT
+# 14. STREAMLIT USER INTERFACE
 # ============================================================
 
-print("\n" + "=" * 110)
-print("METHOD 1: POPULARITY-BASED RECOMMENDATION")
-print("=" * 110)
+import streamlit as st
 
-popular_result = recommend_popular(10)
+st.set_page_config(
+    page_title="Book Recommender System",
+    page_icon="📚",
+    layout="wide"
+)
 
-print(popular_result.to_string())
+# -----------------------------
+# Styling
+# -----------------------------
+st.markdown("""
+<style>
+    .main-title {
+        font-size: 42px;
+        font-weight: 700;
+        margin-bottom: 0;
+    }
+    .subtitle {
+        color: #666;
+        font-size: 17px;
+        margin-bottom: 25px;
+    }
+    .method-card {
+        padding: 18px;
+        border-radius: 12px;
+        border: 1px solid #ddd;
+        margin-bottom: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
+st.markdown('<div class="main-title">📚 Book Recommender System</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">Explore books using Popularity-Based, Content-Based, '
+    'Collaborative, and Hybrid Recommendation methods.</div>',
+    unsafe_allow_html=True
+)
 
-# ============================================================
-# 16. DISPLAY METHOD 2 RESULT
-# ============================================================
+# -----------------------------
+# Sidebar
+# -----------------------------
+st.sidebar.header("⚙️ Controls")
 
-print("\n" + "=" * 110)
-print("METHOD 2: CONTENT-BASED FILTERING")
-print("=" * 110)
+common_books = sorted(set(indices.index).intersection(set(bookmat.columns)))
 
-print("Selected Book:", example_book)
+if not common_books:
+    st.error("No common books are available between the content and collaborative models.")
+    st.stop()
 
-content_result = get_recommendations(example_book, 10)
+default_book = example_book if example_book in common_books else common_books[0]
 
-if content_result.empty:
-    print("No Content-Based recommendations found.")
-else:
-    print(content_result.to_string())
+selected_book = st.sidebar.selectbox(
+    "Select a book",
+    common_books,
+    index=common_books.index(default_book)
+)
 
+top_n = st.sidebar.slider(
+    "Number of recommendations",
+    min_value=5,
+    max_value=20,
+    value=10,
+    step=5
+)
 
-# ============================================================
-# 17. DISPLAY METHOD 3 RESULT
-# ============================================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("Hybrid Weights")
+st.sidebar.write("Content-Based: **40%**")
+st.sidebar.write("Collaborative: **45%**")
+st.sidebar.write("Popularity-Based: **15%**")
 
-print("\n" + "=" * 110)
-print("METHOD 3: COLLABORATIVE FILTERING")
-print("=" * 110)
+# -----------------------------
+# Dashboard metrics
+# -----------------------------
+st.header("📊 Dataset Overview")
 
-print("Selected Book:", example_book)
-print("Minimum Common Users:", MIN_COMMON_USERS)
+col1, col2, col3, col4 = st.columns(4)
 
-collaborative_result = recommend_collaborative(example_book, 10)
+col1.metric("Users", f"{number_of_users:,}")
+col2.metric("Books", f"{number_of_books:,}")
+col3.metric("Ratings", f"{number_of_ratings:,}")
+col4.metric("Average Rating", f"{ratings_data['Book-Rating'].mean():.2f}/10")
 
-if collaborative_result.empty:
-    print("No Collaborative Filtering recommendations found.")
-else:
-    print(collaborative_result.to_string())
+st.info(
+    f"**Selected book:** {selected_book}  \n"
+    f"**User-Item Matrix Sparsity:** {matrix_sparsity:.2%}"
+)
 
+# -----------------------------
+# Charts
+# -----------------------------
+st.header("📈 Dataset Analysis")
 
-# ============================================================
-# 18. DISPLAY METHOD 4 RESULT
-# ============================================================
+chart_col1, chart_col2 = st.columns(2)
 
-print("\n" + "=" * 110)
-print("METHOD 4: HYBRID RECOMMENDATION")
-print("=" * 110)
+with chart_col1:
+    st.subheader("Rating Distribution")
+    rating_counts = ratings_data["Book-Rating"].value_counts().sort_index()
+    st.bar_chart(rating_counts)
 
-print("Content-Based Weight       : 40%")
-print("Collaborative Weight       : 45%")
-print("Popularity-Based Weight    : 15%")
+with chart_col2:
+    st.subheader("Top 10 Most-Rated Books")
+    st.bar_chart(top_books.sort_values(ascending=True))
 
-hybrid_result = recommend_hybrid(example_book, 10)
+# -----------------------------
+# Recommendation methods
+# -----------------------------
+st.header("🔎 Recommendations")
 
-if hybrid_result.empty:
-    print("No Hybrid recommendations found.")
-else:
-    print("\nTop 10 Hybrid Recommendations:")
-    print(hybrid_result.to_string())
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⭐ Popularity-Based",
+    "📖 Content-Based",
+    "👥 Collaborative",
+    "🔥 Hybrid"
+])
 
+with tab1:
+    st.subheader("Popularity-Based Recommendation")
+    st.caption("Ranks books using weighted rating, considering both rating quality and number of ratings.")
 
-# ============================================================
-# 19. HYBRID WEIGHT CHART
-# ============================================================
+    popular_result = recommend_popular(top_n)
 
-hybrid_weights = pd.Series({
-    "Content-Based": 40,
-    "Collaborative": 45,
-    "Popularity-Based": 15
-})
+    if popular_result.empty:
+        st.warning("No popularity-based recommendations found.")
+    else:
+        display_popular = popular_result.rename(columns={
+            "Book-Title": "Book Title",
+            "Book-Author": "Author",
+            "rating_count": "Ratings",
+            "rating_average": "Average Rating",
+            "weighted_rating": "Weighted Rating"
+        })
+        st.dataframe(display_popular, use_container_width=True)
 
-plt.figure(figsize=(8, 5))
-hybrid_weights.plot(kind="bar")
-plt.title("Hybrid Recommendation Weights")
-plt.xlabel("Recommendation Method")
-plt.ylabel("Weight (%)")
-plt.xticks(rotation=0)
-plt.tight_layout()
-plt.show()
+with tab2:
+    st.subheader("Content-Based Filtering")
+    st.caption("Finds books with similar title, author, and publisher information using TF-IDF and cosine similarity.")
 
+    content_result = get_recommendations(selected_book, top_n)
 
-# ============================================================
-# 20. COMPLETION MESSAGE
-# ============================================================
+    if content_result.empty:
+        st.warning("No content-based recommendations found for this book.")
+    else:
+        display_content = content_result.rename(columns={
+            "Book-Title": "Book Title",
+            "Book-Author": "Author",
+            "Similarity": "Similarity Score"
+        })
+        st.dataframe(display_content, use_container_width=True)
 
-print("\n" + "=" * 110)
-print("PROGRAM COMPLETED SUCCESSFULLY")
-print("=" * 110)
+with tab3:
+    st.subheader("Collaborative Filtering")
+    st.caption("Recommends books based on rating patterns from users who rated the selected book similarly.")
+
+    collaborative_result = recommend_collaborative(selected_book, top_n)
+
+    if collaborative_result.empty:
+        st.warning(
+            "No collaborative recommendations found. "
+            "The model requires enough common users and ratings."
+        )
+    else:
+        display_collab = collaborative_result.rename(columns={
+            "Book-Title": "Book Title",
+            "Correlation": "Correlation",
+            "Common Users": "Common Users",
+            "Number of Ratings": "Number of Ratings"
+        })
+        st.dataframe(display_collab, use_container_width=True)
+
+with tab4:
+    st.subheader("Hybrid Recommendation")
+    st.caption("Combines Content-Based, Collaborative, and Popularity scores.")
+
+    hybrid_result = recommend_hybrid(selected_book, top_n)
+
+    if hybrid_result.empty:
+        st.warning("No hybrid recommendations found.")
+    else:
+        display_hybrid = hybrid_result.rename(columns={
+            "Book-Title": "Book Title",
+            "Book-Author": "Author",
+            "Content": "Content Score",
+            "Collaborative": "Collaborative Score",
+            "Popularity": "Popularity Score",
+            "Hybrid Score": "Final Hybrid Score"
+        })
+        st.dataframe(display_hybrid, use_container_width=True)
+
+        st.subheader("Hybrid Score Breakdown")
+        chart_data = display_hybrid.set_index("Book Title")[
+            ["Content Score", "Collaborative Score", "Popularity Score"]
+        ]
+        st.bar_chart(chart_data)
+
+# -----------------------------
+# Selected book details
+# -----------------------------
+st.header("📘 Selected Book Information")
+
+book_info = books[books["Book-Title"] == selected_book][
+    ["Book-Title", "Book-Author", "Publisher", "ISBN"]
+].drop_duplicates()
+
+if not book_info.empty:
+    st.dataframe(
+        book_info.rename(columns={
+            "Book-Title": "Book Title",
+            "Book-Author": "Author"
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# -----------------------------
+# Method explanation
+# -----------------------------
+with st.expander("ℹ️ How the recommendation system works"):
+    st.markdown("""
+    **1. Popularity-Based Recommendation**  
+    Uses average rating and rating count to calculate a weighted rating.
+
+    **2. Content-Based Filtering**  
+    Uses TF-IDF on book title, author, and publisher, then calculates cosine similarity.
+
+    **3. Collaborative Filtering**  
+    Compares rating patterns between books using users who rated both books.
+
+    **4. Hybrid Recommendation**  
+    Combines the three methods using:
+    - Content-Based = **40%**
+    - Collaborative = **45%**
+    - Popularity-Based = **15%**
+    """)
+
+st.success("✅ Book Recommender System is ready!")
