@@ -135,6 +135,11 @@ def build_system():
 
     number_of_ratings = len( ratings_data )
 
+    cleaned_books_count = len( books )
+    merged_records_count = len( data )
+    average_rating = ratings_data[ "Book-Rating" ].mean()
+    minimum_rating = ratings_data[ "Book-Rating" ].min()
+    maximum_rating = ratings_data[ "Book-Rating" ].max()
 
     possible_ratings = ( number_of_users * number_of_books )
 
@@ -454,6 +459,21 @@ def build_system():
 
         "number_of_ratings":
             number_of_ratings,
+
+        "cleaned_books_count":
+            cleaned_books_count,
+
+        "merged_records_count":
+            merged_records_count,
+
+        "average_rating":
+            average_rating,
+
+        "minimum_rating":
+            minimum_rating,
+
+        "maximum_rating":
+            maximum_rating,
 
         "matrix_sparsity":
             matrix_sparsity,
@@ -2429,11 +2449,29 @@ elif navigation == "Developer":
     overview4.metric( "Sparsity", f"{system['matrix_sparsity'] * 100:.2f}%" )
 
     # --------------------------------------------------------
+    # DATASET STATISTICS
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader( "2. Dataset Statistics" )
+    st.caption( "Key statistics calculated after data preprocessing." )
+
+    stat1, stat2, stat3 = st.columns( 3 )
+    stat1.metric( "Cleaned Books", f"{system['cleaned_books_count']:,}" )
+    stat2.metric( "Explicit Ratings", f"{system['number_of_ratings']:,}" )
+    stat3.metric( "Merged Records", f"{system['merged_records_count']:,}" )
+
+    stat4, stat5, stat6 = st.columns( 3 )
+    stat4.metric( "Average Rating", f"{system['average_rating']:.2f}" )
+    stat5.metric( "Minimum Rating", f"{system['minimum_rating']:.0f}" )
+    stat6.metric( "Maximum Rating", f"{system['maximum_rating']:.0f}" )
+
+    # --------------------------------------------------------
     # DATASET ANALYSIS DASHBOARD
     # --------------------------------------------------------
 
     st.divider()
-    st.subheader( "2. Dataset Analysis" )
+    st.subheader( "3. Dataset Analysis" )
 
     st.caption(
         "Choose Graph or Records for each dataset analysis."
@@ -2597,7 +2635,7 @@ elif navigation == "Developer":
     # --------------------------------------------------------
 
     st.divider()
-    st.subheader( "3. Choose Recommendation Method" )
+    st.subheader( "4. Choose Recommendation Method" )
     st.caption(
         "Developers can compare Popularity-Based, Content-Based, Collaborative and Hybrid."
     )
@@ -2689,7 +2727,7 @@ elif navigation == "Developer":
     # --------------------------------------------------------
 
     st.divider()
-    st.subheader( "4. Evaluation Metrics" )
+    st.subheader( "5. Evaluation Metrics" )
 
     st.caption(
         "A rating of 8 or above is treated as positive. "
