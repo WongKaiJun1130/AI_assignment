@@ -26,8 +26,8 @@ st.set_page_config(
     layout="wide"
 )
 
-UI_SAMPLE_SIZE = 1000
-TEST_SAMPLE_SIZE = 300
+UI_SAMPLE_SIZE = 10000
+TEST_SAMPLE_SIZE = 1000
 RANDOM_STATE = 42
 BOOKS_PER_PAGE = 20
 
@@ -36,6 +36,10 @@ COLLABORATIVE_WEIGHT = 0.45
 POPULARITY_WEIGHT = 0.15
 
 MIN_COMMON_USERS = 10
+
+EVALUATION_K = 10
+EVALUATION_SAMPLE_SIZE = 20
+RELEVANT_RATING_THRESHOLD = 8
 
 
 # ============================================================
@@ -356,7 +360,7 @@ def build_system():
 
 
     # ========================================================
-    # UI DATASET - RANDOM 1000 BOOKS
+    # UI DATASET - RANDOM 10,000 BOOKS
     # ========================================================
 
     display_columns = [
@@ -366,87 +370,56 @@ def build_system():
         "Publisher"
     ]
 
-
     if "Year-Of-Publication" in books.columns:
-
         display_columns.append( "Year-Of-Publication" )
 
-
     for image_column in [ "Image-URL-M", "Image-URL-L", "Image-URL-S" ]:
-
         if image_column in books.columns:
-
             display_columns.append( image_column )
-
             break
 
-
-    catalog_pool = books[
-        books[
-            "Book-Title"
-        ].isin(
-            common_titles
-        )
-    ][
-        display_columns
-    ].drop_duplicates(
-        subset=[
-            "Book-Title"
-        ]
-    ).copy()
-
-
+    # Use unique rated books for the user catalogue.
+    catalog_pool = books[ display_columns ].drop_duplicates( subset=[ "Book-Title" ] ).copy()
     catalog_pool = catalog_pool.merge( rating_stats.reset_index(), on="Book-Title", how="left" )
-
+    catalog_pool = catalog_pool[ catalog_pool[ "rating" ].notna() ].reset_index( drop=True )
 
     ui_n = min( UI_SAMPLE_SIZE, len( catalog_pool ) )
 
+    # ========================================================
+    # RANDOM 1,000 TESTING BOOKS
+    # ========================================================
 
-    ui_books = catalog_pool.sample( n=ui_n, random_state=RANDOM_STATE ).reset_index( drop=True )
+    # Testing books must be supported by Content-Based and Collaborative methods.
+    test_pool = catalog_pool[ catalog_pool[ "Book-Title" ].isin( common_titles ) ].copy()
+    test_n = min( TEST_SAMPLE_SIZE, len( test_pool ), ui_n )
+    test_books = test_pool.sample( n=test_n, random_state=RANDOM_STATE + 1 ).reset_index( drop=True )
 
+    # Keep the 1,000 testing books inside the 10,000 UI catalogue.
+    test_titles = set( test_books[ "Book-Title" ] )
+    remaining_pool = catalog_pool[ ~catalog_pool[ "Book-Title" ].isin( test_titles ) ].copy()
+    remaining_n = max( 0, ui_n - test_n )
 
-    # Keep example book inside UI
+    if remaining_n > 0:
+        remaining_books = remaining_pool.sample(
+            n=min( remaining_n, len( remaining_pool ) ),
+            random_state=RANDOM_STATE
+        )
+
+        ui_books = pd.concat( [ test_books, remaining_books ], ignore_index=True )
+
+    else:
+        ui_books = test_books.copy()
+
+    ui_books = ui_books.drop_duplicates( subset=[ "Book-Title" ] ).reset_index( drop=True )
+
+    # Keep the example book inside the UI catalogue.
     if (
-        example_book
-        not in
-        set(
-            ui_books[
-                "Book-Title"
-            ]
-        )
-        and
-        example_book
-        in
-        set(
-            catalog_pool[
-                "Book-Title"
-            ]
-        )
-        and
-        len(
-            ui_books
-        ) > 0
+        example_book not in set( ui_books[ "Book-Title" ] )
+        and example_book in set( catalog_pool[ "Book-Title" ] )
+        and len( ui_books ) > 0
     ):
-
         example_row = catalog_pool[ catalog_pool[ "Book-Title" ] == example_book ].head( 1 )
-
-
         ui_books = pd.concat( [ example_row, ui_books.iloc[ :-1 ] ], ignore_index=True )
-
-
-    # ========================================================
-    # RANDOM 300 TESTING BOOKS
-    # ========================================================
-
-    test_n = min(
-        TEST_SAMPLE_SIZE,
-        len(
-            ui_books
-        )
-    )
-
-
-    test_books = ui_books.sample( n=test_n, random_state=RANDOM_STATE + 1 ).reset_index( drop=True )
 
 
     # Book information lookup
@@ -877,7 +850,105 @@ def recommend_hybrid( title, top_n=10 ):
 
 
 # ============================================================
-# 4. BOOK + RATING HELPERS
+# 4. EVALUATION - PRECISION@10, RECALL@10, F1@10
+# ============================================================
+
+@st.cache_data(show_spinner=False)
+def build_evaluation_ground_truth():
+    positive_data = system["data"][ system["data"]["Book-Rating"] >= RELEVANT_RATING_THRESHOLD ][ [ "User-ID", "Book-Title" ] ].drop_duplicates()
+    eligible_titles = set( bookmat.columns ).intersection( set( indices.index ) )
+    positive_data = positive_data[ positive_data["Book-Title"].isin( eligible_titles ) ].copy()
+
+    user_positive_books = positive_data.groupby( "User-ID" )[ "Book-Title" ].apply( list ).to_dict()
+    book_positive_users = positive_data.groupby( "Book-Title" )[ "User-ID" ].apply( list ).to_dict()
+
+    ground_truth = {}
+
+    for query_title in test_books[ "Book-Title" ].drop_duplicates().tolist():
+        positive_users = book_positive_users.get( query_title, [] )
+
+        if len( positive_users ) < 2:
+            continue
+
+        co_like_counts = {}
+
+        for user_id in positive_users:
+            for other_title in user_positive_books.get( user_id, [] ):
+                if other_title != query_title:
+                    co_like_counts[ other_title ] = co_like_counts.get( other_title, 0 ) + 1
+
+        ranked_relevant = [
+            title
+            for title, count in sorted( co_like_counts.items(), key=lambda item: ( -item[1], item[0] ) )
+            if count >= 2
+        ][ :EVALUATION_K ]
+
+        if ranked_relevant:
+            ground_truth[ query_title ] = set( ranked_relevant )
+
+    return ground_truth
+
+
+def get_evaluation_recommendations(method_name, title, top_n=10):
+    if method_name == "Popularity-Based":
+        result = recommend_popular( top_n + 1 )
+    elif method_name == "Content-Based":
+        result = get_recommendations( title, top_n )
+    elif method_name == "Collaborative":
+        result = recommend_collaborative( title, top_n )
+    else:
+        result = recommend_hybrid( title, top_n )
+
+    if result.empty:
+        return []
+
+    recommended_titles = result[ "Book-Title" ].astype(str).tolist()
+    recommended_titles = [ book_title for book_title in recommended_titles if book_title != title ]
+
+    return recommended_titles[ :top_n ]
+
+
+@st.cache_data(show_spinner=False)
+def evaluate_recommender_system(sample_size=EVALUATION_SAMPLE_SIZE, top_n=EVALUATION_K):
+    ground_truth = build_evaluation_ground_truth()
+    query_titles = list( ground_truth.keys() )[ :sample_size ]
+
+    methods = [ "Popularity-Based", "Content-Based", "Collaborative", "Hybrid" ]
+    evaluation_rows = []
+
+    for method_name in methods:
+        precision_scores = []
+        recall_scores = []
+        f1_scores = []
+
+        for query_title in query_titles:
+            relevant_books = ground_truth[ query_title ]
+            recommended_books = get_evaluation_recommendations( method_name, query_title, top_n )
+
+            hits = len( set( recommended_books ).intersection( relevant_books ) )
+            precision = hits / top_n
+            recall = hits / len( relevant_books ) if relevant_books else 0.0
+            f1 = ( 2 * precision * recall / ( precision + recall ) ) if ( precision + recall ) > 0 else 0.0
+
+            precision_scores.append( precision )
+            recall_scores.append( recall )
+            f1_scores.append( f1 )
+
+        evaluation_rows.append(
+            {
+                "Method": method_name,
+                "Precision@10": round( float( np.mean( precision_scores ) ), 4 ) if precision_scores else 0.0,
+                "Recall@10": round( float( np.mean( recall_scores ) ), 4 ) if recall_scores else 0.0,
+                "F1@10": round( float( np.mean( f1_scores ) ), 4 ) if f1_scores else 0.0,
+                "Evaluated Queries": len( query_titles )
+            }
+        )
+
+    return pd.DataFrame( evaluation_rows )
+
+
+# ============================================================
+# 5. BOOK + RATING HELPERS
 # ============================================================
 
 def get_cover_url(title):
@@ -1204,28 +1275,40 @@ def make_dataset_figure(graph_name):
 
 
     elif graph_name == "Top 10 Most-Rated Books":
+        plt.close( fig )
+        fig, ax = plt.subplots( figsize=(6.5, 3.2) )
+
         top_books = (
             system["data"]
-            .groupby(
-                "Book-Title"
-            )["Book-Rating"]
+            .groupby( "Book-Title" )[ "Book-Rating" ]
             .count()
-            .sort_values(
-                ascending=False
-            )
+            .sort_values( ascending=False )
             .head(10)
             .sort_values()
         )
 
-        ax.barh( top_books.index, top_books.values )
+        display_titles = [
+            title if len( str(title) ) <= 38 else str(title)[:35] + "..."
+            for title in top_books.index
+        ]
 
-        ax.set_title( "Top 10 Most-Rated Books" )
+        ax.barh( display_titles, top_books.values )
 
-        ax.set_xlabel( "Number of Ratings" )
+        ax.set_title( "Top 10 Most-Rated Books", fontsize=10, pad=6 )
+        ax.set_xlabel( "Number of Ratings", fontsize=8 )
+        ax.set_ylabel( "Book Title", fontsize=8 )
 
-        ax.set_ylabel( "Book Title" )
+        ax.tick_params( axis="x", labelsize=7 )
+        ax.tick_params( axis="y", labelsize=7 )
 
-        ax.grid( axis="x", alpha=0.35 )
+        ax.grid( axis="x", alpha=0.25 )
+
+        fig.subplots_adjust(
+            left=0.34,
+            right=0.97,
+            top=0.88,
+            bottom=0.17
+        )
 
 
     elif graph_name == "Distribution of Average Book Ratings":
@@ -1269,9 +1352,89 @@ def make_dataset_figure(graph_name):
 
         ax.grid( axis="y", alpha=0.35 )
 
-    fig.tight_layout()
+    if graph_name != "Top 10 Most-Rated Books":
+        fig.tight_layout()
 
     return fig
+
+
+# ============================================================
+# 8. DATASET ANALYSIS RECORDS
+# ============================================================
+
+def get_dataset_analysis_records( graph_name ):
+
+    if graph_name == "Distribution of User Book Ratings":
+        rating_counts = ratings_data[ "Book-Rating" ].value_counts().reindex( range(1, 11), fill_value=0 ).sort_index()
+
+        return pd.DataFrame(
+            {
+                "Book Rating": rating_counts.index,
+                "Number of Ratings": rating_counts.values
+            }
+        )
+
+    if graph_name == "Hybrid Recommendation Weights":
+        return pd.DataFrame(
+            {
+                "Recommendation Method": [ "Content-Based", "Collaborative", "Popularity-Based" ],
+                "Weight (%)": [ CONTENT_WEIGHT * 100, COLLABORATIVE_WEIGHT * 100, POPULARITY_WEIGHT * 100 ]
+            }
+        )
+
+    if graph_name == "Distribution of Average Book Ratings":
+        average_values = rating_stats[ "rating" ].dropna()
+        bins = np.linspace( 1, 10, 11 )
+        counts, edges = np.histogram( average_values, bins=bins )
+
+        ranges = [
+            f"{edges[index]:.1f} - {edges[index + 1]:.1f}"
+            for index in range( len(counts) )
+        ]
+
+        return pd.DataFrame(
+            {
+                "Average Rating Range": ranges,
+                "Number of Books": counts
+            }
+        )
+
+    if graph_name == "Distribution of Number of Book Ratings":
+        rating_count_values = rating_stats[ "num of ratings" ].dropna()
+
+        bins = [ 0, 5, 10, 20, 50, 100, 200, 400, 800, np.inf ]
+        labels = [ "1 - 5", "6 - 10", "11 - 20", "21 - 50", "51 - 100", "101 - 200", "201 - 400", "401 - 800", "801+" ]
+
+        grouped = pd.cut(
+            rating_count_values,
+            bins=bins,
+            labels=labels,
+            include_lowest=True,
+            right=True
+        ).value_counts().reindex( labels, fill_value=0 )
+
+        return pd.DataFrame(
+            {
+                "Number of Ratings Range": grouped.index.astype(str),
+                "Number of Books": grouped.values
+            }
+        )
+
+    if graph_name == "Top 10 Most-Rated Books":
+        top_books = (
+            system[ "data" ]
+            .groupby( "Book-Title" )[ "Book-Rating" ]
+            .count()
+            .sort_values( ascending=False )
+            .head(10)
+            .reset_index()
+        )
+
+        top_books.columns = [ "Book Title", "Number of Ratings" ]
+
+        return top_books
+
+    return pd.DataFrame()
 
 
 # ============================================================
@@ -1727,7 +1890,56 @@ def render_catalog_cards(
 
 
 # ============================================================
-# 12. PAGE DESIGN
+# 12. BEST METHOD HELPERS
+# ============================================================
+
+def get_best_method():
+    if "evaluation_results" in st.session_state:
+        result = st.session_state[ "evaluation_results" ]
+
+        if isinstance( result, pd.DataFrame ) and not result.empty:
+            best_row = result.loc[ result[ "F1@10" ].idxmax() ]
+            best_method = str( best_row[ "Method" ] )
+            best_f1 = float( best_row[ "F1@10" ] )
+
+            reason = (
+                f"{best_method} is currently the best method because it has the highest "
+                f"F1@10 score ({best_f1:.4f}) in the latest Developer evaluation."
+            )
+
+            return best_method, reason
+
+    return (
+        "Popularity-Based",
+        "Popularity-Based is used as the current default best method. "
+        "Run Evaluation Metrics in Developer to compare all four methods. "
+        "After evaluation, Main automatically uses the method with the highest F1@10."
+    )
+
+
+def get_method_result( method_name, title, top_n=10 ):
+    if method_name == "Popularity-Based":
+        result = recommend_popular( top_n + 1 )
+
+        if result.empty:
+            return result
+
+        result = result[ result[ "Book-Title" ] != title ].head( top_n ).copy()
+        result.index = range( 1, len( result ) + 1 )
+
+        return result
+
+    if method_name == "Content-Based":
+        return get_recommendations( title, top_n )
+
+    if method_name == "Collaborative":
+        return recommend_collaborative( title, top_n )
+
+    return recommend_hybrid( title, top_n )
+
+
+# ============================================================
+# 13. PAGE DESIGN
 # ============================================================
 
 st.markdown(
@@ -1815,6 +2027,60 @@ st.markdown(
         section[data-testid="stSidebar"] {
             border-right: 1.5px solid #000000 !important;
         }
+
+        /* ==================================================
+           TOP NAVIGATION - RECTANGULAR TAB STYLE
+           ================================================== */
+        .st-key-nav_main button,
+        .st-key-nav_developer button,
+        .st-key-nav_about button {
+            min-height: 48px !important;
+            border: 1px solid #4b4b4b !important;
+            border-radius: 5px 5px 0 0 !important;
+            background-color: #4b4b4b !important;
+            color: #ffffff !important;
+            font-size: 1.05rem !important;
+            font-weight: 600 !important;
+            box-shadow: none !important;
+        }
+
+        .st-key-nav_main button:hover,
+        .st-key-nav_developer button:hover,
+        .st-key-nav_about button:hover {
+            background-color: #606060 !important;
+            color: #ffffff !important;
+            border-color: #606060 !important;
+        }
+
+        /* Developer Dataset Analysis - normal dashboard size */
+        [class*="st-key-analysis_panel_"] {
+            height: 390px !important;
+            min-height: 390px !important;
+            max-height: 390px !important;
+            overflow: hidden !important;
+            border: 2px solid #000000 !important;
+            border-radius: 8px !important;
+            background-color: #ffffff !important;
+            padding: 10px !important;
+            box-shadow: none !important;
+        }
+
+        [class*="st-key-analysis_panel_"] div[data-testid="stDataFrame"] {
+            max-height: 315px !important;
+            overflow: auto !important;
+        }
+
+        div[data-baseweb="tab-list"] {
+            gap: 6px !important;
+        }
+
+        button[data-baseweb="tab"] {
+            min-height: 40px !important;
+            border: 1.5px solid #000000 !important;
+            border-radius: 5px 5px 0 0 !important;
+            padding: 6px 15px !important;
+            font-weight: 650 !important;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1822,7 +2088,7 @@ st.markdown(
 
 
 # ============================================================
-# 13. SESSION STATE
+# 14. SESSION STATE
 # ============================================================
 
 if "selected_method" not in st.session_state:
@@ -1831,7 +2097,6 @@ if "selected_method" not in st.session_state:
 if "selected_book" not in st.session_state:
     if example_book in set( ui_books[ "Book-Title" ] ):
         st.session_state.selected_book = example_book
-
     else:
         st.session_state.selected_book = ui_books.iloc[ 0 ][ "Book-Title" ]
 
@@ -1843,400 +2108,775 @@ if "search_query" not in st.session_state:
 
 
 # ============================================================
-# 14. LEFT SIDEBAR - LIBRARY TOOLS
+# 15. MAIN HEADER + TOP NAVIGATION
 # ============================================================
 
-st.sidebar.title(
-    "📚 Library Tools"
-)
-
-st.sidebar.caption( "Use these controls to organise and analyse the book catalogue." )
-
-minimum_rating = st.sidebar.slider( "Minimum Average Rating", min_value=0.0, max_value=10.0, value=0.0, step=0.5 )
-
-maximum_rating_count = int( min( 500, catalog_with_series[ "num of ratings" ].fillna(0).max() ) )
-
-minimum_users = st.sidebar.slider(
-    "Minimum Users Rated",
-    min_value=0,
-    max_value=max(
-        1,
-        maximum_rating_count
-    ),
-    value=0,
-    step=1
-)
-
-sort_option = st.sidebar.selectbox( "Sort Catalogue", [ "Most Rated", "Highest Rating", "Title A-Z" ] )
-
-group_series = st.sidebar.toggle(
-    "Combine Same-Series Books",
-    value=True,
-    help=(
-        "Same-series books are combined into one catalogue card. "
-        "You can still choose the exact book inside the card."
-    )
-)
-
-st.sidebar.divider()
-
-st.sidebar.subheader( "Dataset Analysis" )
-
-analysis_graph = st.sidebar.selectbox(
-    "Choose Graph",
-    [
-        "Distribution of User Book Ratings",
-        "Top 10 Most-Rated Books",
-        "Distribution of Average Book Ratings",
-        "Distribution of Number of Book Ratings",
-        "Hybrid Recommendation Weights"
-    ]
-)
-
-analysis_figure = make_dataset_figure( analysis_graph )
-
-with st.sidebar:
-    st.pyplot( analysis_figure, clear_figure=True )
-
-st.sidebar.divider()
-
-side1, side2 = st.sidebar.columns( 2 )
-
-side1.metric( "UI Books", f"{len(ui_books):,}" )
-
-side2.metric( "Testing", f"{len(test_books):,}" )
-
-st.sidebar.caption( f"Selected Book: " f"{st.session_state.selected_book}" )
-
-
-# ============================================================
-# 15. MAIN HEADER
-# ============================================================
-
-with st.container(border=True):
-    st.title("📚 Book Recommender System")
+with st.container( border=True ):
+    st.title( "📚 Book Recommender System" )
     st.caption(
-        "Search books, inspect user rating records, compare four recommendation methods, "
-        "and view Top 10 recommendations."
+        "Main is for users, Developer is for recommendation testing and evaluation, "
+        "and About explains the system."
     )
 
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "Main"
 
-# ============================================================
-# 16. FOUR METHODS AT THE TOP
-# ============================================================
+nav_main, nav_developer, nav_about, nav_space = st.columns( [1.15, 1.35, 1.15, 6.35], gap="small" )
 
-st.subheader(
-    "1. Choose Recommendation Method"
+with nav_main:
+    if st.button( "🏠 Main", key="nav_main", width="stretch" ):
+        st.session_state.current_page = "Main"
+        st.rerun()
+
+with nav_developer:
+    if st.button( "🛠️ Developer", key="nav_developer", width="stretch" ):
+        st.session_state.current_page = "Developer"
+        st.rerun()
+
+with nav_about:
+    if st.button( "ℹ️ About", key="nav_about", width="stretch" ):
+        st.session_state.current_page = "About"
+        st.rerun()
+
+navigation = st.session_state.current_page
+
+active_nav_key = {
+    "Main": "nav_main",
+    "Developer": "nav_developer",
+    "About": "nav_about"
+}[ navigation ]
+
+st.markdown(
+    f"""
+    <style>
+        .st-key-{active_nav_key} button {{
+            background-color: #ffffff !important;
+            color: #222222 !important;
+            border: 1px solid #d1d1d1 !important;
+            border-bottom-color: #ffffff !important;
+        }}
+
+        .st-key-{active_nav_key} button:hover {{
+            background-color: #ffffff !important;
+            color: #222222 !important;
+            border-color: #d1d1d1 !important;
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
-st.caption( "Choose one method. Its graph is shown directly below." )
-
-method_columns = st.columns( 4 )
-
-method_buttons = [
-    (
-        "Popularity-Based",
-        "⭐ Popularity-Based"
-    ),
-    (
-        "Content-Based",
-        "📖 Content-Based"
-    ),
-    (
-        "Collaborative",
-        "👥 Collaborative"
-    ),
-    (
-        "Hybrid",
-        "🔥 Hybrid"
-    )
-]
-
-for column, (method_key, method_label) in zip(method_columns, method_buttons):
-    with column:
-        if st.button(
-            method_label,
-            key=f"method_{method_key}",
-            type=(
-                "primary"
-                if st.session_state.selected_method
-                == method_key
-                else "secondary"
-            ),
-            width="stretch"
-        ):
-            st.session_state.selected_method = method_key
-            st.rerun()
-
-method_descriptions = {
-    "Popularity-Based":
-        "Ranks generally popular books using weighted rating.",
-
-    "Content-Based":
-        "Finds similar books using TF-IDF and cosine similarity.",
-
-    "Collaborative":
-        "Uses Pearson correlation based on common users.",
-
-    "Hybrid":
-        "Combines Content 40%, Collaborative 45% and Popularity 15%."
-}
-
-st.info( method_descriptions[ st.session_state.selected_method ] )
-
-st.markdown( f"#### {st.session_state.selected_method} Result Graph" )
-
-method_chart = make_method_chart( st.session_state.selected_method, st.session_state.selected_book, top_n=6 )
-
-if method_chart.empty:
-    st.warning( "No graph is available for this book and method." )
-
-else:
-    st.bar_chart( method_chart, height=330 )
-
 
 # ============================================================
-# 17. DATASET OVERVIEW
+# 16. MAIN - USER INTERFACE
 # ============================================================
 
-st.subheader(
-    "2. Dataset Overview"
-)
+if navigation == "Main":
 
-overview1, overview2, overview3, overview4 = st.columns( 4 )
+    st.sidebar.title( "📚 Library Tools" )
+    st.sidebar.caption( "Search and organise the user book catalogue." )
 
-overview1.metric( "Users", f"{system['number_of_users']:,}" )
-
-overview2.metric( "Rated Books", f"{system['number_of_books']:,}" )
-
-overview3.metric( "UI Catalogue", f"{len(ui_books):,}" )
-
-overview4.metric( "Testing Sample", f"{len(test_books):,}" )
-
-
-# ============================================================
-# 18. SEARCH BOOK
-# ============================================================
-
-st.subheader(
-    "3. Search Book"
-)
-
-search_col, search_button_col = st.columns( [12, 1] )
-
-with search_col:
-    typed_search = st.text_input(
-        "Search",
-        value=st.session_state.search_query,
-        placeholder="Search title, author or publisher...",
-        label_visibility="collapsed",
-        key="search_input_box"
+    minimum_rating = st.sidebar.slider(
+        "Minimum Average Rating",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.5
     )
 
-with search_button_col:
-    search_clicked = st.button( "🔍", key="search_icon_button", width="stretch", help="Search" )
+    maximum_rating_count = int(
+        min( 500, catalog_with_series[ "num of ratings" ].fillna(0).max() )
+    )
 
-if search_clicked:
-    st.session_state.search_query = typed_search.strip()
-    st.rerun()
+    minimum_users = st.sidebar.slider(
+        "Minimum Users Rated",
+        min_value=0,
+        max_value=max( 1, maximum_rating_count ),
+        value=0,
+        step=1
+    )
 
-if typed_search.strip() == "":
-    st.session_state.search_query = ""
+    sort_option = st.sidebar.selectbox(
+        "Sort Catalogue",
+        [ "Most Rated", "Highest Rating", "Title A-Z" ]
+    )
 
-
-# ============================================================
-# 19. FILTER + SORT + REMOVE DUPLICATES
-# ============================================================
-
-filtered_catalog = catalog_with_series.copy()
-
-# Exact same book name must appear only once.
-filtered_catalog = filtered_catalog.drop_duplicates(
-    subset=["Book-Title"],
-    keep="first"
-)
-
-if st.session_state.search_query:
-    keyword = st.session_state.search_query
-
-    mask = (
-        filtered_catalog[
-            "Book-Title"
-        ].str.contains(
-            keyword,
-            case=False,
-            na=False,
-            regex=False
-        )
-        |
-        filtered_catalog[
-            "Book-Author"
-        ].str.contains(
-            keyword,
-            case=False,
-            na=False,
-            regex=False
-        )
-        |
-        filtered_catalog[
-            "Publisher"
-        ].str.contains(
-            keyword,
-            case=False,
-            na=False,
-            regex=False
+    group_series = st.sidebar.toggle(
+        "Combine Same-Series Books",
+        value=True,
+        help=(
+            "Same-series books are combined into one catalogue card. "
+            "You can still choose the exact book inside the card."
         )
     )
 
-    filtered_catalog = filtered_catalog[ mask ].copy()
+    st.sidebar.divider()
+    st.sidebar.caption( f"Selected Book: {st.session_state.selected_book}" )
 
-filtered_catalog = filtered_catalog[ filtered_catalog[ "rating" ].fillna(0) >= minimum_rating ].copy()
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
 
-filtered_catalog = filtered_catalog[ filtered_catalog[ "num of ratings" ].fillna(0) >= minimum_users ].copy()
+    st.subheader( "1. Search Book" )
 
-if sort_option == "Most Rated":
-    filtered_catalog = filtered_catalog.sort_values( "num of ratings", ascending=False, na_position="last" )
+    search_col, search_button_col = st.columns( [12, 1] )
 
-elif sort_option == "Highest Rating":
-    filtered_catalog = filtered_catalog.sort_values( "rating", ascending=False, na_position="last" )
+    with search_col:
+        typed_search = st.text_input(
+            "Search",
+            value=st.session_state.search_query,
+            placeholder="Search title, author or publisher...",
+            label_visibility="collapsed",
+            key="search_input_box"
+        )
 
-else:
-    filtered_catalog = filtered_catalog.sort_values( "Book-Title", ascending=True )
+    with search_button_col:
+        search_clicked = st.button(
+            "🔍",
+            key="search_icon_button",
+            width="stretch",
+            help="Search"
+        )
 
-series_groups = (
-    filtered_catalog.groupby(
-        "Series-Key"
-    )["Book-Title"]
-    .apply(
-        lambda values:
-            list(
-                dict.fromkeys(
-                    values.tolist()
-                )
+    if search_clicked:
+        st.session_state.search_query = typed_search.strip()
+        st.rerun()
+
+    if typed_search.strip() == "":
+        st.session_state.search_query = ""
+
+    # --------------------------------------------------------
+    # FILTER + SORT
+    # --------------------------------------------------------
+
+    filtered_catalog = catalog_with_series.copy()
+    filtered_catalog = filtered_catalog.drop_duplicates(
+        subset=[ "Book-Title" ],
+        keep="first"
+    )
+
+    if st.session_state.search_query:
+        keyword = st.session_state.search_query
+
+        mask = (
+            filtered_catalog[ "Book-Title" ].str.contains(
+                keyword, case=False, na=False, regex=False
             )
-    )
-    .to_dict()
-)
+            |
+            filtered_catalog[ "Book-Author" ].str.contains(
+                keyword, case=False, na=False, regex=False
+            )
+            |
+            filtered_catalog[ "Publisher" ].str.contains(
+                keyword, case=False, na=False, regex=False
+            )
+        )
 
-if group_series:
-    filtered_catalog = (
-        filtered_catalog
-        .sort_values(
+        filtered_catalog = filtered_catalog[ mask ].copy()
+
+    filtered_catalog = filtered_catalog[
+        filtered_catalog[ "rating" ].fillna(0) >= minimum_rating
+    ].copy()
+
+    filtered_catalog = filtered_catalog[
+        filtered_catalog[ "num of ratings" ].fillna(0) >= minimum_users
+    ].copy()
+
+    if sort_option == "Most Rated":
+        filtered_catalog = filtered_catalog.sort_values(
             "num of ratings",
             ascending=False,
             na_position="last"
         )
-        .drop_duplicates(
-            subset=[
-                "Series-Key"
-            ],
-            keep="first"
+
+    elif sort_option == "Highest Rating":
+        filtered_catalog = filtered_catalog.sort_values(
+            "rating",
+            ascending=False,
+            na_position="last"
         )
-        .reset_index(
-            drop=True
-        )
-    )
-
-else:
-    filtered_catalog = filtered_catalog.reset_index( drop=True )
-
-
-# ============================================================
-# 20. BOOK CATALOGUE
-# ============================================================
-
-st.subheader(
-    "4. Book Catalogue"
-)
-
-if group_series:
-    st.caption(
-        "Same-series books are combined into one card. "
-        "Choose the exact book using the selector inside the card."
-    )
-
-else:
-    st.caption( "Each card represents one unique book title." )
-
-if filtered_catalog.empty:
-    st.warning( "No books match the current search and filters." )
-
-else:
-    total_results = len( filtered_catalog )
-
-    total_pages = max( 1, math.ceil( total_results / BOOKS_PER_PAGE ) )
-
-    page_col, information_col = st.columns( [1, 4] )
-
-    with page_col:
-        page_number = st.selectbox( "Page", options=list( range( 1, total_pages + 1 ) ) )
-
-    with information_col:
-        st.caption(
-            f"Showing {total_results:,} catalogue card(s). "
-            "Click View Rating Records to inspect exact user ratings."
-        )
-
-    start = ( page_number - 1 ) * BOOKS_PER_PAGE
-
-    end = ( start + BOOKS_PER_PAGE )
-
-    page_data = filtered_catalog.iloc[ start:end ]
-
-    render_catalog_cards( page_data, group_series, series_groups )
-
-
-# ============================================================
-# 21. SELECTED BOOK + USER RATING RECORDS
-# ============================================================
-
-st.divider()
-
-st.subheader( "5. Selected Book & User Rating Records" )
-
-render_selected_book( st.session_state.detail_book )
-
-
-# ============================================================
-# 22. TOP 10 RECOMMENDATION RESULTS
-# ============================================================
-
-st.divider()
-
-st.subheader( "6. Top 10 Recommendation Results" )
-
-selected_book = st.session_state.selected_book
-selected_method = st.session_state.selected_method
-
-st.info( f"Selected Book: **{selected_book}**  |  " f"Method: **{selected_method}**" )
-
-with st.spinner( "Generating recommendations..." ):
-    if selected_method == "Popularity-Based":
-        recommendation_result = recommend_popular( 10 )
-
-    elif selected_method == "Content-Based":
-        recommendation_result = get_recommendations( selected_book, 10 )
-
-    elif selected_method == "Collaborative":
-        recommendation_result = recommend_collaborative( selected_book, 10 )
 
     else:
-        recommendation_result = recommend_hybrid( selected_book, 10 )
+        filtered_catalog = filtered_catalog.sort_values(
+            "Book-Title",
+            ascending=True
+        )
 
-render_recommendation_cards( recommendation_result, selected_method )
+    series_groups = (
+        filtered_catalog.groupby( "Series-Key" )[ "Book-Title" ]
+        .apply( lambda values: list( dict.fromkeys( values.tolist() ) ) )
+        .to_dict()
+    )
+
+    if group_series:
+        filtered_catalog = (
+            filtered_catalog
+            .sort_values(
+                "num of ratings",
+                ascending=False,
+                na_position="last"
+            )
+            .drop_duplicates(
+                subset=[ "Series-Key" ],
+                keep="first"
+            )
+            .reset_index( drop=True )
+        )
+
+    else:
+        filtered_catalog = filtered_catalog.reset_index( drop=True )
+
+    # --------------------------------------------------------
+    # BOOK CATALOGUE
+    # --------------------------------------------------------
+
+    st.subheader( "2. Book Catalogue" )
+
+    if group_series:
+        st.caption(
+            "Same-series books are combined into one card. "
+            "Choose the exact book using the selector inside the card."
+        )
+    else:
+        st.caption( "Each card represents one unique book title." )
+
+    if filtered_catalog.empty:
+        st.warning( "No books match the current search and filters." )
+
+    else:
+        total_results = len( filtered_catalog )
+        total_pages = max( 1, math.ceil( total_results / BOOKS_PER_PAGE ) )
+
+        page_col, information_col = st.columns( [1, 4] )
+
+        with page_col:
+            page_number = st.selectbox(
+                "Page",
+                options=list( range( 1, total_pages + 1 ) ),
+                key="main_catalog_page"
+            )
+
+        with information_col:
+            st.caption(
+                f"Showing {total_results:,} catalogue card(s). "
+                "Click View Rating Records to select a book."
+            )
+
+        start = ( page_number - 1 ) * BOOKS_PER_PAGE
+        end = start + BOOKS_PER_PAGE
+        page_data = filtered_catalog.iloc[ start:end ]
+
+        render_catalog_cards( page_data, group_series, series_groups )
+
+    # --------------------------------------------------------
+    # SELECTED BOOK + RATING RECORDS
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader( "3. Selected Book & User Rating Records" )
+    render_selected_book( st.session_state.detail_book )
+
+    # --------------------------------------------------------
+    # RECOMMENDATIONS FOR USER
+    # --------------------------------------------------------
+
+    st.divider()
+
+    best_method, best_reason = get_best_method()
+
+
+    st.subheader( "4. Recommended For You" )
+
+    selected_book = st.session_state.selected_book
+
+    st.caption(
+        f"Recommendations based on your selected book: **{selected_book}**"
+    )
+
+    with st.spinner( "Generating recommendations..." ):
+        best_result = get_method_result( best_method, selected_book, 10 )
+
+    render_recommendation_cards( best_result, best_method )
 
 
 # ============================================================
-# 23. RANDOM 300 TESTING DATASET
+# 17. DEVELOPER - METHODS + EVALUATION
 # ============================================================
 
-with st.expander(
-    "Random 300 Testing Dataset"
-):
-    st.write( f"UI browsing dataset: " f"**{UI_SAMPLE_SIZE:,} books**" )
+elif navigation == "Developer":
 
-    st.write( f"Random testing sample: " f"**{TEST_SAMPLE_SIZE:,} books**" )
+    st.sidebar.title( "🛠️ Developer Tools" )
+    st.sidebar.caption(
+        "Compare recommendation methods and evaluate system performance."
+    )
 
-    st.write( f"Random State: " f"**{RANDOM_STATE + 1}**" )
+    st.sidebar.divider()
+    st.sidebar.caption(
+        "Dataset analysis graphs are displayed in the Developer dashboard."
+    )
 
-    st.dataframe( test_books[ [ "ISBN", "Book-Title", "Book-Author" ] ], hide_index=True, width="stretch" )
+    # --------------------------------------------------------
+    # DATASET OVERVIEW
+    # --------------------------------------------------------
+
+    st.subheader( "1. Dataset Overview" )
+
+    overview1, overview2, overview3, overview4 = st.columns( 4 )
+
+    overview1.metric( "Users", f"{system['number_of_users']:,}" )
+    overview2.metric( "Rated Books", f"{system['number_of_books']:,}" )
+    overview3.metric( "Ratings", f"{system['number_of_ratings']:,}" )
+    overview4.metric( "Sparsity", f"{system['matrix_sparsity'] * 100:.2f}%" )
+
+    # --------------------------------------------------------
+    # DATASET ANALYSIS DASHBOARD
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader( "2. Dataset Analysis" )
+
+    st.caption(
+        "Choose Graph or Records for each dataset analysis."
+    )
+
+    # --------------------------------------------------------
+    # ROW 1 - TWO ANALYSIS PANELS
+    # --------------------------------------------------------
+
+    row1_left, row1_right = st.columns( 2, gap="large" )
+
+    with row1_left:
+        st.markdown( "### Distribution of User Book Ratings" )
+
+        graph_tab, record_tab = st.tabs( [ "📊 Graph", "📋 Records" ] )
+
+        with graph_tab:
+            with st.container( border=True, key="analysis_panel_user_ratings_graph" ):
+                figure_user_ratings = make_dataset_figure( "Distribution of User Book Ratings" )
+                st.pyplot( figure_user_ratings, clear_figure=True, width="stretch" )
+                st.caption( "Shows how frequently users gave ratings from 1 to 10." )
+
+        with record_tab:
+            with st.container( border=True, key="analysis_panel_user_ratings_record" ):
+                user_rating_records = get_dataset_analysis_records( "Distribution of User Book Ratings" )
+
+                st.dataframe(
+                    user_rating_records,
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    column_config={
+                        "Book Rating": st.column_config.NumberColumn( "Book Rating", format="%d" ),
+                        "Number of Ratings": st.column_config.NumberColumn( "Number of Ratings", format="%d" )
+                    }
+                )
+
+
+    with row1_right:
+        st.markdown( "### Hybrid Recommendation Weights" )
+
+        graph_tab, record_tab = st.tabs( [ "📊 Graph", "📋 Records" ] )
+
+        with graph_tab:
+            with st.container( border=True, key="analysis_panel_hybrid_weights_graph" ):
+                figure_hybrid_weights = make_dataset_figure( "Hybrid Recommendation Weights" )
+                st.pyplot( figure_hybrid_weights, clear_figure=True, width="stretch" )
+                st.caption( "Shows Content 40%, Collaborative 45% and Popularity 15%." )
+
+        with record_tab:
+            with st.container( border=True, key="analysis_panel_hybrid_weights_record" ):
+                hybrid_weight_records = get_dataset_analysis_records( "Hybrid Recommendation Weights" )
+
+                st.dataframe(
+                    hybrid_weight_records,
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    column_config={
+                        "Recommendation Method": st.column_config.TextColumn( "Recommendation Method" ),
+                        "Weight (%)": st.column_config.NumberColumn( "Weight (%)", format="%.0f" )
+                    }
+                )
+
+
+    # --------------------------------------------------------
+    # ROW 2 - TWO ANALYSIS PANELS
+    # --------------------------------------------------------
+
+    row2_left, row2_right = st.columns( 2, gap="large" )
+
+    with row2_left:
+        st.markdown( "### Distribution of Average Book Ratings" )
+
+        graph_tab, record_tab = st.tabs( [ "📊 Graph", "📋 Records" ] )
+
+        with graph_tab:
+            with st.container( border=True, key="analysis_panel_average_ratings_graph" ):
+                figure_average_ratings = make_dataset_figure( "Distribution of Average Book Ratings" )
+                st.pyplot( figure_average_ratings, clear_figure=True, width="stretch" )
+                st.caption( "Shows how average book ratings are distributed." )
+
+        with record_tab:
+            with st.container( border=True, key="analysis_panel_average_ratings_record" ):
+                average_rating_records = get_dataset_analysis_records( "Distribution of Average Book Ratings" )
+
+                st.dataframe(
+                    average_rating_records,
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    column_config={
+                        "Average Rating Range": st.column_config.TextColumn( "Average Rating Range" ),
+                        "Number of Books": st.column_config.NumberColumn( "Number of Books", format="%d" )
+                    }
+                )
+
+
+    with row2_right:
+        st.markdown( "### Distribution of Number of Book Ratings" )
+
+        graph_tab, record_tab = st.tabs( [ "📊 Graph", "📋 Records" ] )
+
+        with graph_tab:
+            with st.container( border=True, key="analysis_panel_rating_counts_graph" ):
+                figure_rating_counts = make_dataset_figure( "Distribution of Number of Book Ratings" )
+                st.pyplot( figure_rating_counts, clear_figure=True, width="stretch" )
+                st.caption( "Shows how many ratings books usually receive." )
+
+        with record_tab:
+            with st.container( border=True, key="analysis_panel_rating_counts_record" ):
+                rating_count_records = get_dataset_analysis_records( "Distribution of Number of Book Ratings" )
+
+                st.dataframe(
+                    rating_count_records,
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    column_config={
+                        "Number of Ratings Range": st.column_config.TextColumn( "Number of Ratings Range" ),
+                        "Number of Books": st.column_config.NumberColumn( "Number of Books", format="%d" )
+                    }
+                )
+
+
+    # --------------------------------------------------------
+    # ROW 3 - TOP 10 MOST-RATED BOOKS
+    # --------------------------------------------------------
+
+    st.markdown( "### Top 10 Most-Rated Books" )
+
+    top10_left_space, top10_col, top10_right_space = st.columns( [1, 2, 1], gap="large" )
+
+    with top10_col:
+        graph_tab, record_tab = st.tabs( [ "📊 Graph", "📋 Records" ] )
+
+        with graph_tab:
+            with st.container( border=True, key="analysis_panel_most_rated_graph" ):
+                figure_most_rated = make_dataset_figure( "Top 10 Most-Rated Books" )
+                st.pyplot( figure_most_rated, clear_figure=True, width="stretch" )
+                st.caption( "Shows the ten books with the largest number of ratings." )
+
+        with record_tab:
+            with st.container( border=True, key="analysis_panel_most_rated_record" ):
+                most_rated_records = get_dataset_analysis_records( "Top 10 Most-Rated Books" )
+
+                st.dataframe(
+                    most_rated_records,
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    column_config={
+                        "Book Title": st.column_config.TextColumn( "Book Title" ),
+                        "Number of Ratings": st.column_config.NumberColumn( "Number of Ratings", format="%d" )
+                    }
+                )
+
+
+    # --------------------------------------------------------
+    # CHOOSE RECOMMENDATION METHOD
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader( "3. Choose Recommendation Method" )
+    st.caption(
+        "Developers can compare Popularity-Based, Content-Based, Collaborative and Hybrid."
+    )
+
+    method_columns = st.columns( 4 )
+
+    method_buttons = [
+        ( "Popularity-Based", "⭐ Popularity-Based" ),
+        ( "Content-Based", "📖 Content-Based" ),
+        ( "Collaborative", "👥 Collaborative" ),
+        ( "Hybrid", "🔥 Hybrid" )
+    ]
+
+    for column, (method_key, method_label) in zip(method_columns, method_buttons):
+        with column:
+            if st.button(
+                method_label,
+                key=f"method_{method_key}",
+                type=(
+                    "primary"
+                    if st.session_state.selected_method == method_key
+                    else "secondary"
+                ),
+                width="stretch"
+            ):
+                st.session_state.selected_method = method_key
+                st.rerun()
+
+    method_descriptions = {
+        "Popularity-Based":
+            "Ranks generally popular books using weighted rating.",
+
+        "Content-Based":
+            "Finds similar books using TF-IDF and cosine similarity.",
+
+        "Collaborative":
+            "Uses Pearson correlation based on common users.",
+
+        "Hybrid":
+            "Combines Content 40%, Collaborative 45% and Popularity 15%."
+    }
+
+    st.info( method_descriptions[ st.session_state.selected_method ] )
+
+    developer_book = st.selectbox(
+        "Book for Method Testing",
+        options=test_books[ "Book-Title" ].drop_duplicates().tolist(),
+        index=0,
+        key="developer_test_book"
+    )
+
+    st.markdown(
+        f"#### {st.session_state.selected_method} Result Graph"
+    )
+
+    method_chart = make_method_chart(
+        st.session_state.selected_method,
+        developer_book,
+        top_n=6
+    )
+
+    if method_chart.empty:
+        st.warning(
+            "No graph is available for this book and method."
+        )
+    else:
+        st.bar_chart(
+            method_chart,
+            height=330
+        )
+
+    developer_result = get_method_result(
+        st.session_state.selected_method,
+        developer_book,
+        10
+    )
+
+    with st.expander( "View Top 10 Method Results" ):
+        if developer_result.empty:
+            st.warning( "No recommendation result is available." )
+        else:
+            st.dataframe(
+                developer_result,
+                width="stretch"
+            )
+
+    # --------------------------------------------------------
+    # EVALUATION METRICS
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader( "4. Evaluation Metrics" )
+
+    st.caption(
+        "A rating of 8 or above is treated as positive. "
+        "Precision@10 measures recommendation accuracy, Recall@10 measures how many relevant books are found, "
+        "and F1@10 balances Precision and Recall."
+    )
+
+    st.info(
+        f"Choose how many valid query books you want to evaluate from the Random "
+        f"{TEST_SAMPLE_SIZE:,} Testing Dataset."
+    )
+
+    evaluation_col1, evaluation_col2 = st.columns( [1, 3] )
+
+    with evaluation_col1:
+        evaluated_queries = st.number_input(
+            "Number of Evaluated Queries",
+            min_value=1,
+            max_value=TEST_SAMPLE_SIZE,
+            value=min( EVALUATION_SAMPLE_SIZE, TEST_SAMPLE_SIZE ),
+            step=1
+        )
+
+    with evaluation_col2:
+        st.caption(
+            "A larger number gives a broader evaluation, but Collaborative and Hybrid "
+            "methods will take longer to calculate."
+        )
+
+    if st.button(
+        "Run Evaluation",
+        key="run_evaluation_button",
+        type="primary"
+    ):
+        with st.spinner(
+            f"Evaluating {evaluated_queries} query books using the four recommendation methods..."
+        ):
+            st.session_state[ "evaluation_results" ] = evaluate_recommender_system(
+                sample_size=int( evaluated_queries ),
+                top_n=EVALUATION_K
+            )
+
+            st.session_state[ "evaluation_requested_queries" ] = int(
+                evaluated_queries
+            )
+
+    if "evaluation_results" in st.session_state:
+        evaluation_results = st.session_state[ "evaluation_results" ]
+
+        st.markdown( "#### Evaluation Result Table" )
+
+        st.dataframe(
+            evaluation_results,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Method": st.column_config.TextColumn(
+                    "Recommendation Method"
+                ),
+                "Precision@10": st.column_config.NumberColumn(
+                    "Precision@10",
+                    format="%.4f"
+                ),
+                "Recall@10": st.column_config.NumberColumn(
+                    "Recall@10",
+                    format="%.4f"
+                ),
+                "F1@10": st.column_config.NumberColumn(
+                    "F1@10",
+                    format="%.4f"
+                ),
+                "Evaluated Queries": st.column_config.NumberColumn(
+                    "Evaluated Queries",
+                    format="%d"
+                )
+            }
+        )
+
+        actual_queries = (
+            int( evaluation_results[ "Evaluated Queries" ].max() )
+            if not evaluation_results.empty
+            else 0
+        )
+
+        requested_queries = st.session_state.get(
+            "evaluation_requested_queries",
+            EVALUATION_SAMPLE_SIZE
+        )
+
+        if actual_queries < requested_queries:
+            st.warning(
+                f"You requested {requested_queries} queries, but only {actual_queries} "
+                "testing books had enough relevant user-rating data for evaluation."
+            )
+
+        st.markdown(
+            "#### Precision, Recall and F1 Score Graph"
+        )
+
+        evaluation_graph = evaluation_results.set_index(
+            "Method"
+        )[ [ "Precision@10", "Recall@10", "F1@10" ] ]
+
+        st.bar_chart(
+            evaluation_graph,
+            height=420,
+            y_label="Score"
+        )
+
+        if not evaluation_results.empty:
+            best_row = evaluation_results.loc[
+                evaluation_results[ "F1@10" ].idxmax()
+            ]
+
+            st.success(
+                f"Best Method: {best_row['Method']} | "
+                f"Highest F1@10: {float(best_row['F1@10']):.4f}. "
+                "Main will automatically use this method as the best recommendation method."
+            )
+
+    # --------------------------------------------------------
+    # RANDOM 1,000 TESTING DATASET
+    # --------------------------------------------------------
+
+    st.divider()
+
+    with st.expander(
+        f"Random {TEST_SAMPLE_SIZE:,} Testing Dataset"
+    ):
+        st.write(
+            f"UI browsing dataset: **{len(ui_books):,} books**"
+        )
+
+        st.write(
+            f"Random testing sample: **{len(test_books):,} books**"
+        )
+
+        st.write(
+            f"Random State: **{RANDOM_STATE + 1}**"
+        )
+
+        st.dataframe(
+            test_books[
+                [ "ISBN", "Book-Title", "Book-Author" ]
+            ],
+            hide_index=True,
+            width="stretch"
+        )
+
+
+# ============================================================
+# 18. ABOUT
+# ============================================================
+
+else:
+
+    st.subheader( "About the Book Recommender System" )
+
+    st.write(
+        "The Book Recommender System helps users discover books based on rating popularity, "
+        "book information and user rating behaviour."
+    )
+
+    about1, about2 = st.columns( 2 )
+
+    with about1:
+        st.markdown( "### 🎯 Main Purpose" )
+        st.write(
+            "Users can search the catalogue, select a book, inspect user rating records "
+            "and receive Top 10 recommendations using the current best method."
+        )
+
+        st.markdown( "### 📚 Dataset Usage" )
+        st.write(
+            f"The user interface uses up to **{UI_SAMPLE_SIZE:,} books**, while "
+            f"**{TEST_SAMPLE_SIZE:,} books** are reserved as the testing sample."
+        )
+
+    with about2:
+        st.markdown( "### 🤖 Recommendation Methods" )
+        st.write( "**Popularity-Based:** Weighted rating." )
+        st.write( "**Content-Based:** TF-IDF and similarity." )
+        st.write( "**Collaborative:** Pearson correlation from user behaviour." )
+        st.write( "**Hybrid:** 40% Content, 45% Collaborative and 15% Popularity." )
+
+        st.markdown( "### 📊 Evaluation" )
+        st.write(
+            "Developer mode compares the four methods using Precision@10, Recall@10 and F1@10. "
+            "The method with the highest F1@10 is automatically treated as the best method in Main."
+        )
