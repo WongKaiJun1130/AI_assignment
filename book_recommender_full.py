@@ -2257,12 +2257,8 @@ with st.container(border=True):
 
     with title_text:
         st.markdown(
-            "<h1 style='margin:0; padding:0;'>BookWise</h1>",
+            "<h1 style='margin:0; padding:0;'>Book Recommender System</h1>",
             unsafe_allow_html=True
-        )
-
-        st.caption(
-            "Smart Book Recommendation System"
         )
 
     st.caption(
