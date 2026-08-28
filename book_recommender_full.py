@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
+import requests
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
@@ -971,24 +972,108 @@ def evaluate_recommender_system(sample_size=EVALUATION_SAMPLE_SIZE, top_n=EVALUA
 # 5. BOOK + RATING HELPERS
 # ============================================================
 
+@st.cache_data(show_spinner=False)
+def check_image_url(url):
+    try:
+        response = requests.get(
+            url,
+            timeout=5,
+            stream=True,
+            headers={
+                "User-Agent": "BookRecommenderSystem/1.0"
+            }
+        )
+
+        content_type = response.headers.get(
+            "Content-Type",
+            ""
+        ).lower()
+
+        return (
+            response.status_code == 200
+            and "image" in content_type
+        )
+
+    except requests.RequestException:
+        return False
+
+
+@st.cache_data(show_spinner=False)
+def get_openlibrary_cover(isbn):
+    if isbn is None:
+        return None
+
+    isbn = str(isbn).strip()
+
+    isbn = re.sub(
+        r"[^0-9Xx]",
+        "",
+        isbn
+    )
+
+    if not isbn:
+        return None
+
+    cover_url = (
+        f"https://covers.openlibrary.org/"
+        f"b/isbn/{isbn}-M.jpg?default=false"
+    )
+
+    if check_image_url(cover_url):
+        return cover_url
+
+    return None
+
+
 def get_cover_url(title):
     if title not in book_info.index:
         return None
 
     row = book_info.loc[title]
 
-    for column in ["Image-URL-M", "Image-URL-L", "Image-URL-S"]:
-        if column in row.index:
-            value = row[column]
+    # --------------------------------------------------
+    # 1. Try original Book-Crossing image URLs
+    # --------------------------------------------------
 
-            if pd.notna(value):
-                value = str(value).strip()
+    for column in [
+        "Image-URL-L",
+        "Image-URL-M",
+        "Image-URL-S"
+    ]:
 
-                if value:
-                    if value.startswith("http://"):
-                        value = "https://" + value[7:]
+        if column not in row.index:
+            continue
 
-                    return value
+        value = row[column]
+
+        if pd.isna(value):
+            continue
+
+        value = str(value).strip()
+
+        if not value:
+            continue
+
+        if value.startswith("http://"):
+            value = "https://" + value[7:]
+
+        if value.startswith("https://"):
+            if check_image_url(value):
+                return value
+
+    # --------------------------------------------------
+    # 2. If original cover is broken,
+    #    try Open Library using ISBN
+    # --------------------------------------------------
+
+    isbn = row.get("ISBN")
+
+    openlibrary_cover = get_openlibrary_cover(
+        isbn
+    )
+
+    if openlibrary_cover:
+        return openlibrary_cover
 
     return None
 
@@ -997,13 +1082,39 @@ def show_cover(title, width=150):
     cover_url = get_cover_url(title)
 
     if cover_url:
-        st.image(cover_url, width=width)
+        st.image(
+            cover_url,
+            width=width
+        )
+
     else:
-        with st.container(border=True):
-            st.markdown("### 📕")
-            st.caption("No Cover Available")
-
-
+        st.markdown(
+            """
+            <div style="
+                width:145px;
+                height:205px;
+                display:flex;
+                flex-direction:column;
+                align-items:center;
+                justify-content:center;
+                border:1px solid #cccccc;
+                border-radius:6px;
+                background:#f5f5f5;
+                text-align:center;
+            ">
+                <div style="font-size:42px;">📕</div>
+                <div style="
+                    font-size:12px;
+                    margin-top:8px;
+                    color:#777777;
+                ">
+                    No Cover Available
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
 def get_book_details(title):
     matches = books[ books["Book-Title"] == title ].copy()
 
@@ -2131,11 +2242,32 @@ if "search_query" not in st.session_state:
 # 15. MAIN HEADER + TOP NAVIGATION
 # ============================================================
 
-with st.container( border=True ):
-    st.title( "📚 Book Recommender System" )
+with st.container(border=True):
+
+    title_icon, title_text = st.columns(
+        [0.6, 9.4],
+        vertical_alignment="center"
+    )
+
+    with title_icon:
+        st.markdown(
+            "<div style='font-size:42px;'>📖</div>",
+            unsafe_allow_html=True
+        )
+
+    with title_text:
+        st.markdown(
+            "<h1 style='margin:0; padding:0;'>BookWise</h1>",
+            unsafe_allow_html=True
+        )
+
+        st.caption(
+            "Smart Book Recommendation System"
+        )
+
     st.caption(
-        "Main is for users, Developer is for recommendation testing and evaluation, "
-        "and About explains the system."
+        "Main is for users, Developer is for recommendation testing "
+        "and evaluation and About explains the system."
     )
 
 if "current_page" not in st.session_state:
@@ -2169,23 +2301,71 @@ active_nav_key = {
 st.markdown(
     f"""
     <style>
-        .st-key-{active_nav_key} button {{
-            background-color: #ffffff !important;
-            color: #222222 !important;
-            border: 1px solid #d1d1d1 !important;
-            border-bottom-color: #ffffff !important;
-        }}
 
-        .st-key-{active_nav_key} button:hover {{
-            background-color: #ffffff !important;
-            color: #222222 !important;
-            border-color: #d1d1d1 !important;
-        }}
+    /* ================================================
+       DEFAULT / NON-SELECTED NAVIGATION BUTTONS
+       ================================================ */
+
+    .st-key-nav_main button,
+    .st-key-nav_developer button,
+    .st-key-nav_about button {{
+
+        background-color: #ffffff !important;
+        color: #222222 !important;
+
+        border: 1px solid #222222 !important;
+        border-radius: 6px !important;
+
+        min-height: 48px !important;
+
+        box-shadow: none !important;
+    }}
+
+
+    /* ================================================
+       NON-SELECTED BUTTON HOVER
+       ================================================ */
+
+    .st-key-nav_main button:hover,
+    .st-key-nav_developer button:hover,
+    .st-key-nav_about button:hover {{
+
+        background-color: #eeeeee !important;
+        color: #222222 !important;
+
+        border-color: #222222 !important;
+    }}
+
+
+    /* ================================================
+       CURRENTLY SELECTED BUTTON
+       ================================================ */
+
+    .st-key-{active_nav_key} button {{
+
+        background-color: #4b4b4b !important;
+        color: #ffffff !important;
+
+        border: 1px solid #222222 !important;
+
+        font-weight: 600 !important;
+    }}
+
+
+    /* ================================================
+       SELECTED BUTTON HOVER
+       ================================================ */
+
+    .st-key-{active_nav_key} button:hover {{
+
+        background-color: #4b4b4b !important;
+        color: #ffffff !important;
+    }}
+
     </style>
     """,
     unsafe_allow_html=True
 )
-
 
 # ============================================================
 # 16. MAIN - USER INTERFACE
@@ -2193,7 +2373,7 @@ st.markdown(
 
 if navigation == "Main":
 
-    st.sidebar.title( "📚 Library Tools" )
+    st.sidebar.title( "📚 Book Explorer" )
     st.sidebar.caption( "Search and organise the user book catalogue." )
 
     minimum_rating = st.sidebar.slider(
@@ -2884,37 +3064,407 @@ elif navigation == "Developer":
 
 else:
 
-    st.subheader( "About the Book Recommender System" )
+    # --------------------------------------------------------
+    # ABOUT HEADER
+    # --------------------------------------------------------
+
+    st.title("ℹ️ About the Book Recommender System")
 
     st.write(
-        "The Book Recommender System helps users discover books based on rating popularity, "
-        "book information and user rating behaviour."
+        "The Book Recommender System is an Artificial Intelligence "
+        "application developed to help users discover suitable books "
+        "from a large book collection."
     )
 
-    about1, about2 = st.columns( 2 )
+    st.write(
+        "The system analyses book information, rating popularity and "
+        "user-rating behaviour using several recommendation techniques "
+        "to generate Top 10 book recommendations."
+    )
 
-    with about1:
-        st.markdown( "### 🎯 Main Purpose" )
-        st.write(
-            "Users can search the catalogue, select a book, inspect user rating records "
-            "and receive Top 10 recommendations using the current best method."
+    st.divider()
+
+    # ========================================================
+    # SYSTEM OVERVIEW
+    # ========================================================
+
+    st.subheader("📖 System Overview")
+
+    overview1, overview2, overview3, overview4 = st.columns(4)
+
+    with overview1:
+        st.metric(
+            "Catalogue Books",
+            f"{len(ui_books):,}"
         )
 
-        st.markdown( "### 📚 Dataset Usage" )
-        st.write(
-            f"The user interface uses up to **{UI_SAMPLE_SIZE:,} books**, while "
-            f"**{TEST_SAMPLE_SIZE:,} books** are reserved as the testing sample."
+    with overview2:
+        st.metric(
+            "Testing Books",
+            f"{len(test_books):,}"
         )
 
-    with about2:
-        st.markdown( "### 🤖 Recommendation Methods" )
-        st.write( "**Popularity-Based:** Weighted rating." )
-        st.write( "**Content-Based:** TF-IDF and similarity." )
-        st.write( "**Collaborative:** Pearson correlation from user behaviour." )
-        st.write( "**Hybrid:** 40% Content, 45% Collaborative and 15% Popularity." )
-
-        st.markdown( "### 📊 Evaluation" )
-        st.write(
-            "Developer mode compares the four methods using Precision@10, Recall@10 and F1@10. "
-            "The method with the highest F1@10 is automatically treated as the best method in Main."
+    with overview3:
+        st.metric(
+            "Recommendation Methods",
+            "4"
         )
+
+    with overview4:
+        st.metric(
+            "Top Recommendations",
+            "10"
+        )
+
+    st.caption(
+        "The catalogue and testing values are generated from the "
+        "processed dataset used by the current system."
+    )
+
+    st.divider()
+
+    # ========================================================
+    # MAIN FEATURES
+    # ========================================================
+
+    st.subheader("✨ Main Features")
+
+    feature1, feature2 = st.columns(2, gap="large")
+
+    with feature1:
+
+        with st.container(border=True):
+
+            st.markdown("### 🔍 Book Search")
+
+            st.write(
+                "Search for books using the book title, author "
+                "or publisher."
+            )
+
+        with st.container(border=True):
+
+            st.markdown("### ⭐ User Rating Records")
+
+            st.write(
+                "View the average rating, rating distribution and "
+                "individual user-rating records for a selected book."
+            )
+
+    with feature2:
+
+        with st.container(border=True):
+
+            st.markdown("### 📚 Book Catalogue")
+
+            st.write(
+                "Browse books from the catalogue and view important "
+                "information such as author, publisher and ratings."
+            )
+
+        with st.container(border=True):
+
+            st.markdown("### 🎯 Top 10 Recommendations")
+
+            st.write(
+                "Receive Top 10 book recommendations generated by "
+                "the recommendation methods implemented in the system."
+            )
+
+    st.divider()
+
+    # ========================================================
+    # RECOMMENDATION METHODS
+    # ========================================================
+
+    st.subheader("🤖 Recommendation Methods")
+
+    method1, method2 = st.columns(2, gap="large")
+
+    with method1:
+
+        with st.container(border=True):
+
+            st.markdown("### ⭐ Popularity-Based")
+
+            st.write(
+                "Ranks generally popular books using a weighted-rating "
+                "calculation based on average rating and number of ratings."
+            )
+
+            st.caption(
+                "Technique: Weighted Rating"
+            )
+
+        with st.container(border=True):
+
+            st.markdown("### 🔎 Content-Based Filtering")
+
+            st.write(
+                "Recommends books that contain similar book information "
+                "to the selected book."
+            )
+
+            st.caption(
+                "Technique: TF-IDF + Cosine Similarity"
+            )
+
+    with method2:
+
+        with st.container(border=True):
+
+            st.markdown("### 👥 Collaborative Filtering")
+
+            st.write(
+                "Identifies relationships between books by analysing "
+                "similar user-rating patterns."
+            )
+
+            st.caption(
+                "Technique: User-Item Matrix + Pearson Correlation"
+            )
+
+        with st.container(border=True):
+
+            st.markdown("### 🔥 Hybrid Recommendation")
+
+            st.write(
+                "Combines multiple recommendation signals to produce "
+                "a more balanced recommendation score."
+            )
+
+            st.caption(
+                "40% Content-Based + "
+                "45% Collaborative + "
+                "15% Popularity-Based"
+            )
+
+    st.divider()
+
+    # ========================================================
+    # HOW THE SYSTEM WORKS
+    # ========================================================
+
+    st.subheader("⚙️ How the System Works")
+
+    st.markdown(
+        """
+        **1. Select or search for a book**  
+        The user searches the catalogue or chooses a book.
+
+        **2. View book and rating information**  
+        The system displays book information together with user-rating data.
+
+        **3. Analyse recommendation information**  
+        Different recommendation methods analyse book information,
+        popularity and user-rating behaviour.
+
+        **4. Generate Top 10 recommendations**  
+        Books are ranked according to the selected recommendation method.
+
+        **5. Evaluate recommendation performance**  
+        Developer mode compares the recommendation methods using
+        Precision@10, Recall@10 and F1@10.
+        """
+    )
+
+    st.divider()
+
+    # ========================================================
+    # DATASET INFORMATION
+    # ========================================================
+
+    st.subheader("🗂️ Dataset Information")
+
+    dataset1, dataset2, dataset3 = st.columns(3)
+
+    with dataset1:
+        with st.container(border=True):
+
+            st.markdown("### 📘 Books.csv")
+
+            st.write(
+                "Contains ISBN, book title, author, publication year "
+                "and publisher information."
+            )
+
+    with dataset2:
+        with st.container(border=True):
+
+            st.markdown("### ⭐ Ratings.csv")
+
+            st.write(
+                "Contains User-ID, ISBN and Book-Rating information "
+                "used to analyse user-rating behaviour."
+            )
+
+    with dataset3:
+        with st.container(border=True):
+
+            st.markdown("### 👤 Users.csv")
+
+            st.write(
+                "Contains anonymised user information including "
+                "User-ID, location and age."
+            )
+
+    st.info(
+        "The system uses explicit ratings from 1 to 10. "
+        "Rating 0 is excluded because it represents implicit feedback."
+    )
+
+    st.divider()
+
+    # ========================================================
+    # EVALUATION
+    # ========================================================
+
+    st.subheader("📊 Evaluation Metrics")
+
+    eval1, eval2, eval3 = st.columns(3)
+
+    with eval1:
+        with st.container(border=True):
+
+            st.markdown("### Precision@10")
+
+            st.write(
+                "Measures how many of the Top 10 recommended books "
+                "are relevant."
+            )
+
+    with eval2:
+        with st.container(border=True):
+
+            st.markdown("### Recall@10")
+
+            st.write(
+                "Measures how many relevant books are successfully "
+                "retrieved in the Top 10 recommendation list."
+            )
+
+    with eval3:
+        with st.container(border=True):
+
+            st.markdown("### F1@10")
+
+            st.write(
+                "Combines Precision and Recall into one overall "
+                "recommendation-performance score."
+            )
+
+    st.caption(
+        "A rating of 8 or above is treated as positive feedback "
+        "during the current evaluation process."
+    )
+
+    st.divider()
+
+    # ========================================================
+    # TECHNOLOGY
+    # ========================================================
+
+    st.subheader("💻 Technology Used")
+
+    tech1, tech2, tech3, tech4 = st.columns(4)
+
+    with tech1:
+        st.info(
+            "🐍 **Python**\n\n"
+            "System programming"
+        )
+
+    with tech2:
+        st.info(
+            "🌐 **Streamlit**\n\n"
+            "Web user interface"
+        )
+
+    with tech3:
+        st.info(
+            "📊 **Pandas / NumPy**\n\n"
+            "Data processing"
+        )
+
+    with tech4:
+        st.info(
+            "🤖 **Scikit-learn**\n\n"
+            "TF-IDF and similarity"
+        )
+
+    st.divider()
+
+    # ========================================================
+    # TEAM CONTRIBUTION
+    # ========================================================
+
+    st.subheader("👨‍💻 Team Contribution")
+
+    team_data = pd.DataFrame(
+        {
+            "Member": [
+                "Wong Kai Jun",
+                "Yeong Wei Kin",
+                "Heng Chun Wai"
+            ],
+
+            "Recommendation Module": [
+                "Popularity-Based Recommendation",
+                "Content-Based Filtering",
+                "Collaborative Filtering"
+            ],
+
+            "Main Technique": [
+                "Weighted Rating",
+                "TF-IDF + Cosine Similarity",
+                "Pearson Correlation"
+            ]
+        }
+    )
+
+    st.dataframe(
+        team_data,
+        hide_index=True,
+        width="stretch"
+    )
+
+    st.caption(
+        "The three recommendation approaches are also integrated "
+        "into the Hybrid Recommendation method."
+    )
+
+    st.divider()
+
+    # ========================================================
+    # LIMITATIONS
+    # ========================================================
+
+    st.subheader("⚠️ Current Limitations")
+
+    st.write(
+        "• Content-Based Filtering is mainly limited to book title, "
+        "author and publisher because the dataset does not provide "
+        "detailed genres, descriptions or keywords."
+    )
+
+    st.write(
+        "• Collaborative Filtering can be affected by data sparsity "
+        "when only a small number of users rate the same books."
+    )
+
+    st.write(
+        "• Popularity-Based recommendations are not personalised "
+        "because users may receive similar popular books."
+    )
+
+    st.write(
+        "• The Hybrid recommendation weights are manually configured "
+        "and may not represent the optimal combination."
+    )
+
+    st.divider()
+
+    st.caption(
+        "BMCS2203 Artificial Intelligence • "
+        "Book Recommender System"
+    )
