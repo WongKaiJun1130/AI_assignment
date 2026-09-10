@@ -699,7 +699,6 @@ def recommend_collaborative( title, top_n=10 ):
 
     result = result[ result[ "Number of Ratings" ] >= 20 ]
 
-
     result = result.sort_values( [ "Correlation", "Common Users" ], ascending=[ False, False ] )
 
 
